@@ -31,16 +31,16 @@ impl AppState {
 
 #[derive(Deserialize)]
 struct HbdParams {
-    #[serde(rename = "ID")]
+    #[serde(alias = "ID", alias = "id", alias = "Id")]
     id: i32,
-    #[serde(rename = "MAC")]
+    #[serde(alias = "MAC", alias = "mac", alias = "Mac")]
     mac: String,
-    #[serde(rename = "IP")]
+    #[serde(alias = "IP", alias = "ip", alias = "Ip")]
     ip: String,
-    #[serde(rename = "LP")]
-    lp: i32,
-    #[serde(rename = "ts")]
-    ts: i64, // timestamp as number (Unix timestamp)
+    #[serde(alias = "LP", alias = "lp", alias = "Lp")]
+    lp: Option<i32>,
+    #[serde(alias = "ts", alias = "TS", alias = "Ts")]
+    ts: Option<i64>, // timestamp as number (Unix timestamp)
 }
 
 #[derive(Serialize)]
@@ -57,9 +57,9 @@ struct HbdData {
     id: i32,
     mac: String,
     ip: String,
-    lp: i32,
-    timestamp: i64,
-    timestamp_iso: String, // Human-readable timestamp
+    lp: Option<i32>,
+    timestamp: Option<i64>,
+    timestamp_iso: Option<String>, // Human-readable timestamp
 }
 
 #[derive(Serialize)]
@@ -128,7 +128,7 @@ async fn hbd(
     Query(params): Query<HbdParams>,
 ) -> Result<Json<HbdResponse>, StatusCode> {
     info!("HBD endpoint called from client: {}", addr);
-    info!("HBD Parameters - ID: {}, MAC: {}, IP: {}, LP: {}, TS: {}", 
+    info!("HBD Parameters - ID: {}, MAC: {}, IP: {}, LP: {:?}, TS: {:?}", 
         params.id, params.mac, params.ip, params.lp, params.ts);
     
     // Validate MAC address format (basic validation)
@@ -149,20 +149,24 @@ async fn hbd(
         return Err(StatusCode::BAD_REQUEST);
     }
     
-    // Validate timestamp (check if it's a reasonable Unix timestamp)
+    // Validate timestamp if provided (check if it's a reasonable Unix timestamp)
     // Allow timestamps from year 2000 (946684800) to year 2100 (4102444800)
-    if params.ts < 946684800 || params.ts > 4102444800 {
-        info!("Invalid timestamp range: {}", params.ts);
-        return Err(StatusCode::BAD_REQUEST);
-    }
-    
-    // Convert Unix timestamp to ISO format for human readability
-    let timestamp_iso = match chrono::DateTime::from_timestamp(params.ts, 0) {
-        Some(dt) => dt.to_rfc3339(),
-        None => {
-            info!("Failed to convert timestamp to ISO format: {}", params.ts);
+    let timestamp_iso = if let Some(ts) = params.ts {
+        if ts < 946684800 || ts > 4102444800 {
+            info!("Invalid timestamp range: {}", ts);
             return Err(StatusCode::BAD_REQUEST);
         }
+        
+        // Convert Unix timestamp to ISO format for human readability
+        match chrono::DateTime::from_timestamp(ts, 0) {
+            Some(dt) => Some(dt.to_rfc3339()),
+            None => {
+                info!("Failed to convert timestamp to ISO format: {}", ts);
+                return Err(StatusCode::BAD_REQUEST);
+            }
+        }
+    } else {
+        None
     };
     
     // Increment HBD counter
