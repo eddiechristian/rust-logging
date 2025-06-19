@@ -1,33 +1,8 @@
-use axum::{
-    extract::ConnectInfo,
-    http::StatusCode,
-    response::Json,
-    routing::get,
-    Router,
-};
 use log::{info, error};
-use serde::Serialize;
 use std::net::SocketAddr;
 use tokio;
 
-#[derive(Serialize)]
-struct HealthResponse {
-    status: String,
-    timestamp: String,
-}
-
-async fn health(ConnectInfo(addr): ConnectInfo<SocketAddr>) -> Result<Json<HealthResponse>, StatusCode> {
-    info!("Health endpoint called from client: {}", addr);
-    info!("Client IP: {}, Client Port: {}", addr.ip(), addr.port());
-    
-    let response = HealthResponse {
-        status: "healthy".to_string(),
-        timestamp: chrono::Utc::now().to_rfc3339(),
-    };
-    
-    info!("Health check successful for client {}: {:?}", addr, response.status);
-    Ok(Json(response))
-}
+mod server;
 
 fn init_logging() -> Result<(), Box<dyn std::error::Error>> {
     use log4rs::{
@@ -38,7 +13,7 @@ fn init_logging() -> Result<(), Box<dyn std::error::Error>> {
     
     let stdout = ConsoleAppender::builder()
         .encoder(Box::new(PatternEncoder::new(
-            "{d(%Y-%m-%d %H:%M:%S)} [{l}] {t} - {m}{n}"
+            "{d(%Y-%m-%d %H:%M:%S)} [{h({l})}] {t} - {m}{n}"
         )))
         .build();
     
@@ -61,8 +36,7 @@ async fn main() {
     info!("Starting Axum health service...");
     
     // Build our application with routes
-    let app = Router::new()
-        .route("/health", get(health));
+    let app = server::create_router();
     
     // Server address
     let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
