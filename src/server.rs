@@ -5,15 +5,15 @@ use axum::{
     routing::get,
     Router,
 };
+use crossbeam::atomic::AtomicCell;
 use log::info;
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, net::SocketAddr, sync::Arc};
-use tokio::sync::RwLock;
+use std::{collections::HashMap, net::SocketAddr};
 
 #[derive(Clone)]
 pub struct AppState {
-    pub request_count: Arc<RwLock<u64>>,
-    pub hbd_count: Arc<RwLock<u64>>,
+    pub health_count: AtomicCell<u64>,
+    pub hbd_count: AtomicCell<u64>,
     pub service_name: String,
     pub version: String,
 }
@@ -21,8 +21,8 @@ pub struct AppState {
 impl AppState {
     pub fn new() -> Self {
         Self {
-            request_count: Arc::new(RwLock::new(0)),
-            hbd_count: Arc::new(RwLock::new(0)),
+            health_count: AtomicCell::new(0),
+            hbd_count: AtomicCell::new(0),
             service_name: "axum-health-service".to_string(),
             version: "0.1.0".to_string(),
         }
@@ -68,7 +68,7 @@ struct HealthResponse {
     timestamp: String,
     service_name: String,
     version: String,
-    request_count: u64,
+    health_count: u64,
     user_agent: Option<String>,
     headers_count: usize,
 }
@@ -101,18 +101,15 @@ async fn health(
         }
     }
     
-    // Increment request counter
-    let mut count = state.request_count.write().await;
-    *count += 1;
-    let current_count = *count;
-    drop(count); // Release the lock early
+    // Increment health counter
+    let current_count = state.health_count.fetch_add(1) + 1;
     
     let response = HealthResponse {
         status: "healthy".to_string(),
         timestamp: chrono::Utc::now().to_rfc3339(),
         service_name: state.service_name.clone(),
         version: state.version.clone(),
-        request_count: current_count,
+        health_count: current_count,
         user_agent,
         headers_count: headers.len(),
     };
@@ -170,10 +167,7 @@ async fn hbd(
     };
     
     // Increment HBD counter
-    let mut count = state.hbd_count.write().await;
-    *count += 1;
-    let current_count = *count;
-    drop(count);
+    let current_count = state.hbd_count.fetch_add(1) + 1;
     
     let response = HbdResponse {
         status: "success".to_string(),
