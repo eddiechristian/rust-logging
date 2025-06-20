@@ -56,37 +56,37 @@ impl Config {
     pub fn from_file(path: &str) -> Result<Self> {
         let content = fs::read_to_string(path)
             .with_context(|| format!("Failed to read config file: {}", path))?;
-        
+
         let config: Config = toml::from_str(&content)
             .with_context(|| format!("Failed to parse TOML config file: {}", path))?;
-        
+
         Ok(config)
     }
-    
+
     /// Save configuration to a TOML file
     pub fn to_file(&self, path: &str) -> Result<()> {
-        let content = toml::to_string_pretty(self)
-            .context("Failed to serialize config to TOML")?;
-        
+        let content = toml::to_string_pretty(self).context("Failed to serialize config to TOML")?;
+
         fs::write(path, content)
             .with_context(|| format!("Failed to write config file: {}", path))?;
-        
+
         Ok(())
     }
-    
+
     /// Load configuration from file, or create default if file doesn't exist
     pub fn load_or_default(path: &str) -> Result<Self> {
         match Self::from_file(path) {
             Ok(config) => Ok(config),
             Err(_) => {
                 let default_config = Self::default();
-                default_config.to_file(path)
+                default_config
+                    .to_file(path)
                     .with_context(|| format!("Failed to create default config file: {}", path))?;
                 Ok(default_config)
             }
         }
     }
-    
+
     /// Get database connection string
     pub fn database_url(&self) -> String {
         format!(
@@ -98,7 +98,7 @@ impl Config {
             self.database.database
         )
     }
-    
+
     /// Get server bind address
     pub fn bind_address(&self) -> String {
         format!("{}:{}", self.app.host, self.app.port)

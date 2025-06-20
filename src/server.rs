@@ -8,8 +8,8 @@ use axum::{
 };
 use crossbeam::atomic::AtomicCell;
 use log::{error, info};
-use mysql::{Pool, PooledConn};
 use mysql::prelude::Queryable;
+use mysql::{Pool, PooledConn};
 use std::net::SocketAddr;
 
 use crate::app::{HbdParams, HbdService, HealthService};
@@ -44,17 +44,15 @@ impl AppState {
             db_pool,
         }
     }
-    
+
     /// Get a database connection from the pool
     pub fn get_connection(&self) -> Result<PooledConn> {
-        self.db_pool
-            .get_conn()
-            .map_err(|e| {
-                error!("Failed to get database connection: {}", e);
-                anyhow::anyhow!("Database connection failed: {}", e)
-            })
+        self.db_pool.get_conn().map_err(|e| {
+            error!("Failed to get database connection: {}", e);
+            anyhow::anyhow!("Database connection failed: {}", e)
+        })
     }
-    
+
     /// Check if database connection is healthy
     pub fn is_db_healthy(&self) -> bool {
         match self.get_connection() {
@@ -72,7 +70,6 @@ impl AppState {
         }
     }
 }
-
 
 async fn health(
     State(state): State<AppState>,
@@ -103,12 +100,7 @@ async fn health(
     }
 
     // Delegate business logic to HealthService
-    let response = HealthService::process_health_check(
-        &state,
-        addr,
-        headers.len(),
-        user_agent,
-    );
+    let response = HealthService::process_health_check(&state, addr, headers.len(), user_agent);
 
     Json(response)
 }

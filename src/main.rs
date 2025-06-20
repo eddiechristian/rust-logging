@@ -1,6 +1,6 @@
 use log::{error, info};
-use mysql::{Pool, OptsBuilder};
 use mysql::prelude::Queryable;
+use mysql::{OptsBuilder, Pool};
 use std::net::SocketAddr;
 use tokio;
 
@@ -76,15 +76,13 @@ async fn main() {
 
     // Test database connectivity
     match db_pool.get_conn() {
-        Ok(mut conn) => {
-            match conn.query_drop("SELECT 1") {
-                Ok(_) => info!("Database connectivity test successful"),
-                Err(e) => {
-                    error!("Database connectivity test failed: {}", e);
-                    std::process::exit(1);
-                }
+        Ok(mut conn) => match conn.query_drop("SELECT 1") {
+            Ok(_) => info!("Database connectivity test successful"),
+            Err(e) => {
+                error!("Database connectivity test failed: {}", e);
+                std::process::exit(1);
             }
-        }
+        },
         Err(e) => {
             error!("Failed to get initial database connection: {}", e);
             std::process::exit(1);
@@ -100,18 +98,20 @@ async fn main() {
         error!("Invalid bind address in config: {}", bind_addr);
         std::process::exit(1);
     });
-    
+
     info!("Server will listen on: {}", addr);
     info!("Health endpoint available at: http://{}/health", addr);
     info!("HBD endpoint available at: http://{}/hbd", addr);
     info!("Server protocol: HTTP/1.1");
     info!("Server framework: Axum v0.7");
 
-    let listener = tokio::net::TcpListener::bind(addr).await.unwrap_or_else(|e| {
-        error!("Failed to bind to {}: {}", addr, e);
-        std::process::exit(1);
-    });
-    
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .unwrap_or_else(|e| {
+            error!("Failed to bind to {}: {}", addr, e);
+            std::process::exit(1);
+        });
+
     info!("TCP listener bound successfully to {}", addr);
     info!("Server is ready to accept connections...");
 
