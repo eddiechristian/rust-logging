@@ -117,13 +117,7 @@ async fn hbd(
     );
 
     // Delegate business logic to HbdService
-    match HbdService::process_heartbeat(&state, params, addr) {
-        Ok(response) => Ok(Json(response)),
-        Err(e) => {
-            error!("HBD processing failed: {}", e);
-            Err(StatusCode::BAD_REQUEST)
-        }
-    }
+   HbdService::process_heartbeat(&state, params, addr)
 }
 
 pub fn create_router(db_pool: Pool) -> Router {

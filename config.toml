@@ -8,7 +8,7 @@ log_level = "info"
 [database]
 host = "localhost"
 port = 3306
-username = "user"
+username = "eddie"
 password = "password"
 database = "eddie"
 pool_size = 10

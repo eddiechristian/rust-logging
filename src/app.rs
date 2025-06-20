@@ -7,17 +7,29 @@ use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 
 use crate::server::AppState;
+use axum::{
+    http::StatusCode,
+    response::Json,
+};
 
 // Static lock-free hashmap for caching device data
-static DEVICE_CACHE: LockFreeHashMap<String, DeviceCacheEntry> = LockFreeHashMap::new();
-
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct DeviceCacheEntry {
+    pub id: u64,
     pub mac: String,
     pub ip: String,
-    pub last_ping: Option<i32>,
-    pub last_seen: i64,
-    pub heartbeat_count: u64,
+    pub pip: String,
+    pub long_poll: u8,
+    pub last_hb_cache_write: Option<DateTime<Utc>>,
+}
+
+static DEVICE_CACHE: std::sync::LazyLock<LockFreeHashMap<String, DeviceCacheEntry>> =
+    std::sync::LazyLock::new(|| LockFreeHashMap::new());
+
+
+struct AuthorizedResult{
+    authorized: bool,
+    squelched: bool,
 }
 
 #[derive(Deserialize)]
@@ -165,17 +177,14 @@ impl HbdService {
         state: &AppState,
         params: HbdParams,
         client_addr: SocketAddr,
-    ) -> Result<HbdResponse> {
+    ) -> Result<Json<crate::app::HbdResponse>, StatusCode> {
         info!(
             "Processing HBD for client {}: ID={}, MAC={}, IP={}",
             client_addr, params.id, params.mac, params.ip
         );
 
-        // Validate input parameters
-        Self::validate_hbd_params(&params)?;
-
         // Convert timestamp to ISO format if provided
-        let timestamp_iso = Self::convert_timestamp_to_iso(params.ts)?;
+        let timestamp_iso = Self::convert_timestamp_to_iso(params.ts);
 
         // Increment HBD counter
         let current_count = state.hbd_count.fetch_add(1) + 1;
@@ -202,50 +211,87 @@ impl HbdService {
             client_addr, current_count
         );
 
-        Ok(response)
+        Ok(Json(response))
     }
 
-    /// Validate heartbeat parameters
-    fn validate_hbd_params(params: &HbdParams) -> Result<()> {
-        // Validate ID (should be positive)
-        if params.id <= 0 {
-            return Err(anyhow::anyhow!("Invalid ID: must be positive"));
-        }
-
-        // Validate MAC address format (basic check)
-        if params.mac.is_empty() || params.mac.len() > 17 {
-            return Err(anyhow::anyhow!("Invalid MAC address format"));
-        }
-
-        // Validate IP address format (basic check)
-        if params.ip.is_empty() {
-            return Err(anyhow::anyhow!("IP address cannot be empty"));
-        }
-
-        // Validate timestamp if provided
-        if let Some(ts) = params.ts {
-            if ts < 946684800 || ts > 4102444800 {
-                return Err(anyhow::anyhow!(
-                    "Invalid timestamp range: {} (must be between 2000-2100)",
-                    ts
-                ));
+    /// is mac in cache or db
+    fn get_authorized(
+        &self, 
+        state: &AppState,
+        mac: &str,
+    ) -> Result<AuthorizedResult, StatusCode> {
+         let guard = lockfreehashmap::pin();
+         match DEVICE_CACHE.get(mac, &guard) {
+            None => {
+                //call db to get auth and squelched.
+                self.call_is_device_active(state, mac)
             }
+            Some(_) => Ok(AuthorizedResult {
+                authorized: true,
+                squelched: false,
+            }),
         }
-
-        Ok(())
     }
+
+    fn call_is_device_active(
+        &self,
+        state: &AppState,
+        mac: &str,
+    ) -> Result<AuthorizedResult, StatusCode> {
+        // Call the stored procedure
+        match state.get_connection() {
+            Ok(mut conn) => {
+                let result: Result<Vec<mysql::Row>, mysql::Error> =
+                    conn.exec("CALL is_device_active(?, @msg)", (mac,));
+
+                // Handle the @msg output parameter properly
+                let _message: Result<Option<String>, mysql::Error> =
+                    conn.query_first("SELECT @msg");
+
+                match result {
+                    Ok(mut rows) => {
+                        if let Some(row) = rows.pop() {
+                            let (_account_id, squelch): (Option<i32>, i32) = mysql::from_row(row);
+                            Ok(AuthorizedResult {
+                                authorized: true,
+                                squelched: squelch != 0,
+                            })
+                        } else {
+                            Ok(AuthorizedResult {
+                                authorized: false,
+                                squelched: true,
+                            })
+                        }
+                    }
+                    Err(_) => Ok(AuthorizedResult {
+                        authorized: false,
+                        squelched: true,
+                    }),
+                }
+            }
+            Err(_) => Err(StatusCode::SERVICE_UNAVAILABLE),
+        }
+    }
+
+
+    /// Get Last database presist for this cache entry.
+    fn get_last_heartbeat_write(mac: &str) -> Option<DateTime<Utc>> {
+        let guard = lockfreehashmap::pin();
+        match DEVICE_CACHE.get(mac, &guard) {
+            None => None,
+            Some(cached_device) => cached_device.last_hb_cache_write,
+        }
+    }
+
 
     /// Convert Unix timestamp to ISO format
-    fn convert_timestamp_to_iso(timestamp: Option<i64>) -> Result<Option<String>> {
+    fn convert_timestamp_to_iso(timestamp: Option<i64>) ->Option<String> {
         match timestamp {
             Some(ts) => match DateTime::from_timestamp(ts, 0) {
-                Some(dt) => Ok(Some(dt.to_rfc3339())),
-                None => Err(anyhow::anyhow!(
-                    "Failed to convert timestamp to ISO format: {}",
-                    ts
-                )),
+                Some(dt) => Some(dt.to_rfc3339()),
+                None => None
             },
-            None => Ok(None),
+            None => None,
         }
     }
 
@@ -265,60 +311,5 @@ impl HbdService {
             params.id
         );
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_validate_hbd_params_valid() {
-        let params = HbdParams {
-            id: 123,
-            mac: "00:11:22:33:44:55".to_string(),
-            ip: "192.168.1.100".to_string(),
-            lp: Some(80),
-            ts: Some(1609459200), // 2021-01-01
-        };
-
-        assert!(HbdService::validate_hbd_params(&params).is_ok());
-    }
-
-    #[test]
-    fn test_validate_hbd_params_invalid_id() {
-        let params = HbdParams {
-            id: -1,
-            mac: "00:11:22:33:44:55".to_string(),
-            ip: "192.168.1.100".to_string(),
-            lp: None,
-            ts: None,
-        };
-
-        assert!(HbdService::validate_hbd_params(&params).is_err());
-    }
-
-    #[test]
-    fn test_validate_hbd_params_invalid_timestamp() {
-        let params = HbdParams {
-            id: 123,
-            mac: "00:11:22:33:44:55".to_string(),
-            ip: "192.168.1.100".to_string(),
-            lp: None,
-            ts: Some(123), // Too old
-        };
-
-        assert!(HbdService::validate_hbd_params(&params).is_err());
-    }
-
-    #[test]
-    fn test_convert_timestamp_to_iso() {
-        let result = HbdService::convert_timestamp_to_iso(Some(1609459200));
-        assert!(result.is_ok());
-        assert!(result.unwrap().is_some());
-
-        let result = HbdService::convert_timestamp_to_iso(None);
-        assert!(result.is_ok());
-        assert!(result.unwrap().is_none());
     }
 }
