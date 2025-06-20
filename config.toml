@@ -1,0 +1,16 @@
+[app]
+name = "axum-health-service"
+version = "0.1.0"
+host = "0.0.0.0"
+port = 3000
+log_level = "info"
+
+[database]
+host = "localhost"
+port = 3306
+username = "user"
+password = "password"
+database = "health_service"
+pool_size = 10
+timeout_seconds = 30
+

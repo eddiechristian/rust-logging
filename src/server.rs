@@ -7,15 +7,17 @@ use axum::{
     routing::get,
 };
 use crossbeam::atomic::AtomicCell;
-use log::info;
+use log::{error, info};
+use mysql::{Pool, PooledConn};
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, net::SocketAddr};
+use std::net::SocketAddr;
 
 pub struct AppState {
     pub health_count: AtomicCell<u64>,
     pub hbd_count: AtomicCell<u64>,
     pub service_name: String,
     pub version: String,
+    pub db_pool: Pool,
 }
 
 impl Clone for AppState {
@@ -25,17 +27,46 @@ impl Clone for AppState {
             hbd_count: AtomicCell::new(self.hbd_count.load()),
             service_name: self.service_name.clone(),
             version: self.version.clone(),
+            db_pool: self.db_pool.clone(),
         }
     }
 }
 
 impl AppState {
-    pub fn new() -> Self {
+    pub fn new(db_pool: Pool) -> Self {
         Self {
             health_count: AtomicCell::new(0),
             hbd_count: AtomicCell::new(0),
             service_name: "axum-health-service".to_string(),
             version: "0.1.0".to_string(),
+            db_pool,
+        }
+    }
+    
+    /// Get a database connection from the pool
+    pub fn get_connection(&self) -> Result<PooledConn> {
+        self.db_pool
+            .get_conn()
+            .map_err(|e| {
+                error!("Failed to get database connection: {}", e);
+                anyhow::anyhow!("Database connection failed: {}", e)
+            })
+    }
+    
+    /// Check if database connection is healthy
+    pub fn is_db_healthy(&self) -> bool {
+        match self.get_connection() {
+            Ok(mut conn) => {
+                // Try a simple query to test the connection
+                match conn.query_drop("SELECT 1") {
+                    Ok(_) => true,
+                    Err(e) => {
+                        error!("Database health check failed: {}", e);
+                        false
+                    }
+                }
+            }
+            Err(_) => false,
         }
     }
 }
@@ -81,6 +112,7 @@ struct HealthResponse {
     health_count: u64,
     user_agent: Option<String>,
     headers_count: usize,
+    database_status: String,
 }
 
 async fn health(
@@ -114,14 +146,29 @@ async fn health(
     // Increment health counter
     let current_count = state.health_count.fetch_add(1) + 1;
 
+    // Check database health
+    let db_healthy = state.is_db_healthy();
+    let database_status = if db_healthy {
+        "connected".to_string()
+    } else {
+        "disconnected".to_string()
+    };
+
+    let overall_status = if db_healthy {
+        "healthy".to_string()
+    } else {
+        "degraded".to_string()
+    };
+
     let response = HealthResponse {
-        status: "healthy".to_string(),
+        status: overall_status,
         timestamp: chrono::Utc::now().to_rfc3339(),
         service_name: state.service_name.clone(),
         version: state.version.clone(),
         health_count: current_count,
         user_agent,
         headers_count: headers.len(),
+        database_status,
     };
 
     info!(
@@ -185,8 +232,8 @@ async fn hbd(
     Ok(Json(response))
 }
 
-pub fn create_router() -> Router {
-    let state = AppState::new();
+pub fn create_router(db_pool: Pool) -> Router {
+    let state = AppState::new(db_pool);
 
     Router::new()
         .route("/health", get(health))
