@@ -1,8 +1,10 @@
 use log::{error, info};
 use mysql::{Pool, OptsBuilder};
+use mysql::prelude::Queryable;
 use std::net::SocketAddr;
 use tokio;
 
+mod app;
 mod config;
 mod server;
 
