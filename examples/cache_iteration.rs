@@ -36,19 +36,19 @@ fn manage_cache_in_thread() -> thread::JoinHandle<()> {
             
             // Example: Iterate over ALL cache entries (this is what DashMap excels at!)
             info!("[THREAD] Iterating over all cache entries:");
-            DeviceCacheManager::iterate_cache_entries(|device_id, entry| {
+            DeviceCacheManager::iterate_cache_entries(|mac_address, entry| {
                 let current_time = chrono::Utc::now().timestamp();
                 let time_since_last_seen = current_time - entry.last_seen;
                 
                 info!(
-                    "[THREAD] Device {}: IP={}, MAC={}, last seen {} seconds ago, heartbeats={}",
-                    device_id, entry.ip, entry.mac, time_since_last_seen, entry.heartbeat_count
+                    "[THREAD] MAC {}: device_id={}, IP={}, last seen {} seconds ago, heartbeats={}",
+                    mac_address, entry.device_id, entry.ip, time_since_last_seen, entry.heartbeat_count
                 );
             });
             
             // Example: Batch update all entries
-            let updated_count = DeviceCacheManager::update_all_entries(|device_id, entry| {
-                info!("[THREAD] Batch updating device: {}", device_id);
+            let updated_count = DeviceCacheManager::update_all_entries(|mac_address, entry| {
+                info!("[THREAD] Batch updating MAC {}: device_id={}", mac_address, entry.device_id);
                 entry.heartbeat_count += 1; // Increment heartbeat
                 true // Keep all entries
             });
@@ -87,20 +87,21 @@ async fn manage_cache_async() {
             }
         }
         
-        // Example: Process specific devices
-        for device_id in &device_ids {
-            if let Some(entry) = DeviceCacheManager::get_device_entry(device_id) {
+        // Example: Process specific devices by MAC
+        let mac_addresses = vec!["AA:BB:CC:DD:EE:01", "AA:BB:CC:DD:EE:02", "AA:BB:CC:DD:EE:03"];
+        for mac_str in &mac_addresses {
+            if let Some(entry) = DeviceCacheManager::get_device_entry_by_mac_str(mac_str) {
                 let current_time = chrono::Utc::now().timestamp();
                 let time_since_last_seen = current_time - entry.last_seen;
                 
                 info!(
-                    "[ASYNC] Device {}: IP={}, MAC={}, last seen {} seconds ago, heartbeats={}",
-                    device_id, entry.ip, entry.mac, time_since_last_seen, entry.heartbeat_count
+                    "[ASYNC] MAC {}: device_id={}, IP={}, last seen {} seconds ago, heartbeats={}",
+                    mac_str, entry.device_id, entry.ip, time_since_last_seen, entry.heartbeat_count
                 );
                 
                 // Update the entry
-                if let Err(e) = DeviceCacheManager::update_cache_entry(device_id.to_string(), entry) {
-                    eprintln!("Failed to update async cache entry for {}: {}", device_id, e);
+                if let Err(e) = DeviceCacheManager::update_cache_entry_by_mac_str(mac_str, entry) {
+                    eprintln!("Failed to update async cache entry for MAC {}: {}", mac_str, e);
                 }
             }
         }
@@ -127,21 +128,27 @@ async fn monitor_device_health_async() {
         let mut stale_devices = 0;
         let mut active_devices = 0;
         
-        for device_id in &known_devices {
-            if let Some(entry) = DeviceCacheManager::get_device_entry(device_id) {
+        // Check known MAC addresses
+        let known_macs = vec![
+            "00:11:22:33:44:01", "00:11:22:33:44:02", "00:11:22:33:44:03",
+            "AA:BB:CC:DD:EE:01", "AA:BB:CC:DD:EE:02", "AA:BB:CC:DD:EE:03"
+        ];
+        
+        for mac_str in &known_macs {
+            if let Some(entry) = DeviceCacheManager::get_device_entry_by_mac_str(mac_str) {
                 let time_since_last_seen = current_time - entry.last_seen;
                 
                 if time_since_last_seen > 600 { // 10 minutes
                     stale_devices += 1;
-                    info!("Stale device detected: {} (last seen {} seconds ago)", device_id, time_since_last_seen);
+                    info!("Stale device detected: MAC {} (last seen {} seconds ago)", mac_str, time_since_last_seen);
                 } else if time_since_last_seen > 120 { // 2 minutes
                     unhealthy_devices += 1;
-                    info!("Potentially unhealthy device: {} (last seen {} seconds ago)", device_id, time_since_last_seen);
+                    info!("Potentially unhealthy device: MAC {} (last seen {} seconds ago)", mac_str, time_since_last_seen);
                 } else {
                     active_devices += 1;
                 }
             } else {
-                info!("Device {} not found in cache", device_id);
+                info!("Device with MAC {} not found in cache", mac_str);
             }
         }
         
@@ -189,7 +196,7 @@ async fn demonstrate_alternative_cache() {
     // Add some sample devices
     for i in 0..5 {
         let entry = DeviceCacheEntry {
-            mac: format!("FF:EE:DD:CC:BB:{:02}", i),
+            device_id: format!("alt_device_{:03}", i),
             ip: format!("172.16.0.{}", i + 1),
             last_ping: Some(80),
             last_seen: chrono::Utc::now().timestamp(),

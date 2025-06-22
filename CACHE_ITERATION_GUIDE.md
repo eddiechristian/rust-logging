@@ -1,14 +1,15 @@
-# Device Cache Iteration Guide
+# Device Cache Iteration and Deletion Guide
 
-This guide demonstrates how to work with the DEVICE_CACHE (a `LockFreeHashMap`) using both threading and async approaches.
+This guide demonstrates how to work with the DEVICE_CACHE (a `DashMap`) using both threading and async approaches, with comprehensive support for iteration and conditional deletion.
 
 ## Overview
 
-The `DEVICE_CACHE` is implemented using `lockfreehashmap::LockFreeHashMap` which provides thread-safe, lock-free operations. However, it has some limitations:
+The `DEVICE_CACHE` is implemented using `dashmap::DashMap` which provides excellent thread-safe, concurrent operations with full iteration support:
 
-- **No direct iteration support**: The crate doesn't provide easy ways to iterate over all entries
-- **Requires Guard objects**: All operations need a `Guard` obtained via `pin()`
-- **Individual operations only**: Best suited for key-based get/set/remove operations
+- **Full iteration support**: Easy iteration over all entries with `.iter()` and `.iter_mut()`
+- **Simple API**: No complex guard objects or special APIs required
+- **High performance**: Lock-free operations with excellent concurrent performance
+- **Conditional deletion**: Rich support for removing entries based on various criteria
 
 ## Implementation
 
@@ -17,26 +18,35 @@ The `DEVICE_CACHE` is implemented using `lockfreehashmap::LockFreeHashMap` which
 We've implemented a `DeviceCacheManager` with the following capabilities:
 
 ```rust
-use lockfreehashmap::pin;
-
 impl DeviceCacheManager {
-    /// Add a new device entry to cache
+    // Basic Operations
     pub fn add_device_entry(device_id: String, mac: String, ip: String, last_ping: Option<i32>) -> Result<()>
-    
-    /// Get a specific device entry from cache
     pub fn get_device_entry(device_id: &str) -> Option<DeviceCacheEntry>
-    
-    /// Update a device cache entry
     pub fn update_cache_entry(device_id: String, entry: DeviceCacheEntry) -> Result<()>
-    
-    /// Remove a specific device entry from cache
     pub fn remove_device_entry(device_id: &str) -> Option<DeviceCacheEntry>
     
-    /// Start cache maintenance in a separate thread
-    pub fn start_cache_maintenance_thread(cleanup_interval_seconds: u64, max_age_seconds: i64) -> thread::JoinHandle<()>
+    // Iteration and Batch Operations
+    pub fn get_cache_snapshot() -> Vec<(String, DeviceCacheEntry)>
+    pub fn iterate_cache_entries<F>(callback: F) where F: FnMut(&String, &DeviceCacheEntry)
+    pub fn update_all_entries<F>(updater: F) -> usize where F: FnMut(&String, &mut DeviceCacheEntry) -> bool
     
-    /// Start async cache maintenance task
+    // Conditional Deletion
+    pub fn remove_entries_matching<F>(predicate: F) -> usize where F: Fn(&String, &DeviceCacheEntry) -> bool
+    pub fn remove_entries_by_ip_pattern(ip_pattern: &str) -> usize
+    pub fn remove_entries_by_mac_pattern(mac_pattern: &str) -> usize
+    pub fn remove_entries_by_device_pattern(device_pattern: &str) -> usize
+    pub fn remove_entries_with_low_heartbeats(min_heartbeats: u64) -> usize
+    pub fn remove_entries_older_than(max_age_seconds: i64) -> usize
+    pub fn iterate_and_remove_with_logging<F>(condition: F) -> (usize, usize)
+    pub fn remove_entries_advanced_criteria(...) -> usize
+    
+    // Maintenance Tasks
+    pub fn start_cache_maintenance_thread(cleanup_interval_seconds: u64, max_age_seconds: i64) -> thread::JoinHandle<()>
     pub async fn start_cache_maintenance_async(cleanup_interval_seconds: u64, max_age_seconds: i64)
+    
+    // Statistics
+    pub fn get_cache_stats() -> CacheStats
+    pub fn get_cache_size() -> usize
 }
 ```
 
@@ -129,9 +139,64 @@ tokio::spawn(async {
 });
 ```
 
-## Alternative Approach for Full Iteration
+## Conditional Deletion Examples
 
-Since `lockfreehashmap` doesn't support easy iteration, here's an alternative using `Arc<Mutex<HashMap>>`:
+DashMap excels at conditional deletion operations. Here are various patterns:
+
+### Basic Pattern Matching
+
+```rust
+// Remove by IP pattern
+let removed = DeviceCacheManager::remove_entries_by_ip_pattern("10.0.0.");
+
+// Remove by MAC pattern  
+let removed = DeviceCacheManager::remove_entries_by_mac_pattern("AA:BB:CC");
+
+// Remove by device name pattern
+let removed = DeviceCacheManager::remove_entries_by_device_pattern("test_");
+
+// Remove by heartbeat count
+let removed = DeviceCacheManager::remove_entries_with_low_heartbeats(5);
+
+// Remove by age
+let removed = DeviceCacheManager::remove_entries_older_than(3600); // 1 hour
+```
+
+### Custom Conditions
+
+```rust
+// Remove with custom condition
+let removed = DeviceCacheManager::remove_entries_matching(|device_id, entry| {
+    // Complex condition: remove if device is a test device with low heartbeats
+    device_id.contains("test") && entry.heartbeat_count < 3
+});
+
+// Remove with detailed logging
+let (checked, removed) = DeviceCacheManager::iterate_and_remove_with_logging(|device_id, entry| {
+    let current_time = chrono::Utc::now().timestamp();
+    let age = current_time - entry.last_seen;
+    
+    // Remove if device hasn't been seen for 30 minutes and has low heartbeats
+    age > 1800 && entry.heartbeat_count < 10
+});
+```
+
+### Advanced Multi-Criteria Deletion
+
+```rust
+// Remove using multiple criteria
+let removed = DeviceCacheManager::remove_entries_advanced_criteria(
+    Some(3600),                           // Older than 1 hour
+    Some(5),                             // Less than 5 heartbeats  
+    Some(&["10.0.0", "192.168.99"]),     // IP patterns
+    Some(&["AA:BB:CC", "FF:EE:DD"]),     // MAC patterns
+    Some(&["test", "temp", "dev"]),      // Device name patterns
+);
+```
+
+## Alternative Approach Comparison
+
+While DashMap provides excellent iteration support, here's a comparison with traditional approaches:
 
 ```rust
 use std::collections::HashMap;
@@ -179,49 +244,56 @@ impl AlternativeCacheManager {
 
 ## Key Design Decisions
 
-### Why lockfreehashmap?
+### Why DashMap?
 
 **Pros:**
-- True lock-free operations
-- High performance for concurrent access
-- No blocking between threads
-- Memory efficient
+- Excellent concurrent performance
+- Full iteration and conditional deletion support
+- Simple, intuitive API
+- Lock-free reads, minimal locking for writes
+- Rich ecosystem of operations
 
 **Cons:**
-- No iteration support
-- Complex API requiring Guards
-- Limited operations
+- Slightly more memory overhead than some alternatives
+- Write operations may have brief locking (but optimized)
 
 ### When to Use Each Approach
 
-1. **lockfreehashmap** - When you need:
+1. **DashMap** (Recommended) - When you need:
    - High-performance concurrent access
-   - Individual key-based operations
-   - No need for full iteration
+   - Full iteration capabilities
+   - Conditional deletion operations
+   - Simple API without complex guards
+   - Production-ready concurrent caching
 
 2. **Arc<Mutex<HashMap>>** - When you need:
-   - Full iteration capabilities
-   - Batch operations
-   - Simpler API
-   - Lower performance requirements
+   - Maximum simplicity
+   - Atomic batch operations across entire map
+   - Lower memory usage
+   - Non-performance-critical scenarios
 
 ## Running the Examples
 
 ```bash
-# Simple demonstration
+# Simple demonstration with full iteration
 cargo run --example simple_cache_demo
 
-# Full-featured example with alternative approaches
+# Full-featured example with threading and async
 cargo run --example cache_iteration
+
+# Comprehensive conditional deletion demonstration
+cargo run --example cache_deletion_demo
 ```
 
 ## Best Practices
 
-1. **Always use Guards**: Every lockfreehashmap operation requires a guard from `pin()`
-2. **Keep known device lists**: Since iteration is limited, maintain lists of device IDs elsewhere
-3. **Design for individual operations**: Structure your code around get/set/remove patterns
-4. **Consider alternatives**: For full iteration needs, evaluate `Arc<Mutex<HashMap>>` or other concurrent data structures
-5. **Monitor performance**: The lock-free nature provides excellent performance for concurrent access
+1. **Use appropriate deletion methods**: Choose the right deletion method for your use case (pattern matching vs custom conditions)
+2. **Batch operations efficiently**: Use `update_all_entries()` for bulk updates rather than individual operations
+3. **Monitor cache size**: Use `get_cache_stats()` to monitor cache health and performance
+4. **Implement proper cleanup**: Use scheduled cleanup tasks to prevent memory leaks
+5. **Log important operations**: Use `iterate_and_remove_with_logging()` for critical deletion operations
+6. **Test deletion conditions**: Always test your deletion predicates thoroughly
+7. **Consider performance**: DashMap provides excellent concurrent performance for real-world scenarios
 
 ## Integration with Your Application
 
@@ -242,5 +314,5 @@ if let Some(mut entry) = DeviceCacheManager::get_device_entry(&device_id) {
 }
 ```
 
-This approach provides both thread-based and async-based cache management while working within the constraints of the lockfreehashmap library.
+This approach provides both thread-based and async-based cache management with full iteration and conditional deletion capabilities using DashMap's excellent concurrent performance.
 
