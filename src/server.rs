@@ -10,7 +10,10 @@ use crossbeam::atomic::AtomicCell;
 use log::{error, info};
 use mysql::prelude::Queryable;
 use mysql::{Pool, PooledConn};
+use sp_stats_monitor::DetailedStatsMonitor;
 use std::net::SocketAddr;
+use std::sync::Arc;
+use std::time::Instant;
 
 use crate::app::{HbdParams, HbdService, HealthService};
 
@@ -20,6 +23,7 @@ pub struct AppState {
     pub service_name: String,
     pub version: String,
     pub db_pool: Pool,
+    pub stats_monitor: Arc<DetailedStatsMonitor>,
 }
 
 impl Clone for AppState {
@@ -30,6 +34,7 @@ impl Clone for AppState {
             service_name: self.service_name.clone(),
             version: self.version.clone(),
             db_pool: self.db_pool.clone(),
+            stats_monitor: self.stats_monitor.clone(),
         }
     }
 }
@@ -42,6 +47,7 @@ impl AppState {
             service_name: "axum-health-service".to_string(),
             version: "0.1.0".to_string(),
             db_pool,
+            stats_monitor: Arc::new(DetailedStatsMonitor::new()),
         }
     }
 
@@ -76,6 +82,8 @@ async fn health(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
 ) -> Json<crate::app::HealthResponse> {
+    let start_time = Instant::now();
+    
     info!("Health endpoint called from client: {}", addr);
     info!("Client IP: {}, Client Port: {}", addr.ip(), addr.port());
 
@@ -101,6 +109,12 @@ async fn health(
 
     // Delegate business logic to HealthService
     let response = HealthService::process_health_check(&state, addr, headers.len(), user_agent);
+    
+    // Record web request performance for /health endpoint
+    let request_duration = start_time.elapsed();
+    state.stats_monitor.record_web_request("/health", request_duration);
+    
+    info!("Health check completed in {:.2}ms", request_duration.as_secs_f64() * 1000.0);
 
     Json(response)
 }
@@ -110,6 +124,8 @@ async fn hbd(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Query(params): Query<HbdParams>,
 ) -> Result<Json<crate::app::HbdResponse>, StatusCode> {
+    let start_time = Instant::now();
+    
     info!("HBD endpoint called from client: {}", addr);
     info!(
         "HBD Parameters - ID: {}, MAC: {}, IP: {}, LP: {:?}, TS: {:?}",
@@ -117,13 +133,118 @@ async fn hbd(
     );
 
     // Delegate business logic to HbdService
-    match HbdService::process_heartbeat(&state, params, addr) {
-        Ok(response) => Ok(Json(response)),
+    let result = match HbdService::process_heartbeat(&state, params, addr) {
+        Ok(response) => {
+            // Record web request performance for /hbd endpoint
+            let request_duration = start_time.elapsed();
+            state.stats_monitor.record_web_request("/hbd", request_duration);
+            info!("HBD request completed in {:.2}ms", request_duration.as_secs_f64() * 1000.0);
+            
+            Ok(Json(response))
+        }
         Err(e) => {
             error!("HBD processing failed: {}", e);
+            
+            // Still record the request timing even for errors
+            let request_duration = start_time.elapsed();
+            state.stats_monitor.record_web_request("/hbd", request_duration);
+            
             Err(StatusCode::BAD_REQUEST)
         }
-    }
+    };
+    
+    result
+}
+
+/// Get current performance statistics
+async fn stats(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+) -> Json<serde_json::Value> {
+    let start_time = Instant::now();
+    info!("Stats endpoint called from client: {}", addr);
+    
+    let (web_detailed_stats, db_detailed_stats) = state.stats_monitor.get_detailed_stats();
+    let (web_agg_stats, db_agg_stats) = state.stats_monitor.get_aggregated_stats();
+    
+    let stats_response = serde_json::json!({
+        "timestamp": chrono::Utc::now().to_rfc3339(),
+        "service": {
+            "name": state.service_name,
+            "version": state.version
+        },
+        "request_counters": {
+            "health_checks": state.health_count.load(),
+            "heartbeats": state.hbd_count.load()
+        },
+        "performance_metrics": {
+            "web_endpoints": web_detailed_stats,
+            "database_queries": db_detailed_stats,
+            "aggregated": {
+                "web_requests": {
+                    "count": web_agg_stats.count,
+                    "min_ms": if web_agg_stats.count > 0 { web_agg_stats.min_ms } else { 0.0 },
+                    "max_ms": web_agg_stats.max_ms,
+                    "mean_ms": web_agg_stats.mean_ms,
+                    "total_ms": web_agg_stats.total_ms
+                },
+                "database_queries": {
+                    "count": db_agg_stats.count,
+                    "min_ms": if db_agg_stats.count > 0 { db_agg_stats.min_ms } else { 0.0 },
+                    "max_ms": db_agg_stats.max_ms,
+                    "mean_ms": db_agg_stats.mean_ms,
+                    "total_ms": db_agg_stats.total_ms
+                }
+            }
+        },
+        "analysis": {
+            "total_operations": web_agg_stats.count + db_agg_stats.count,
+            "db_slower_than_web_ratio": if web_agg_stats.mean_ms > 0.0 && db_agg_stats.mean_ms > 0.0 {
+                db_agg_stats.mean_ms / web_agg_stats.mean_ms
+            } else {
+                0.0
+            },
+            "tracked_endpoints": state.stats_monitor.get_tracked_endpoints(),
+            "tracked_queries": state.stats_monitor.get_tracked_queries()
+        }
+    });
+    
+    // Record stats endpoint performance
+    let request_duration = start_time.elapsed();
+    state.stats_monitor.record_web_request("/stats", request_duration);
+    
+    info!("Stats response generated for client: {} in {:.2}ms", addr, request_duration.as_secs_f64() * 1000.0);
+    
+    Json(stats_response)
+}
+
+/// Reset performance statistics
+async fn stats_reset(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+) -> Json<serde_json::Value> {
+    let start_time = Instant::now();
+    info!("Stats reset endpoint called from client: {}", addr);
+    
+    let (prev_web_stats, prev_db_stats) = state.stats_monitor.get_and_reset_detailed_stats();
+    
+    let reset_response = serde_json::json!({
+        "status": "success",
+        "message": "Performance statistics have been reset",
+        "timestamp": chrono::Utc::now().to_rfc3339(),
+        "previous_stats": {
+            "web_endpoints": prev_web_stats,
+            "database_queries": prev_db_stats
+        }
+    });
+    
+    // Record stats reset endpoint performance
+    let request_duration = start_time.elapsed();
+    state.stats_monitor.record_web_request("/stats/reset", request_duration);
+    
+    info!("Stats reset completed for client: {} in {:.2}ms", addr, request_duration.as_secs_f64() * 1000.0);
+    
+    Json(reset_response)
 }
 
 pub fn create_router(db_pool: Pool) -> Router {
@@ -132,5 +253,7 @@ pub fn create_router(db_pool: Pool) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/hbd", get(hbd))
+        .route("/stats", get(stats))
+        .route("/stats/reset", get(stats_reset))
         .with_state(state)
 }

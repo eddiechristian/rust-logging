@@ -5,13 +5,14 @@ use log::{error, info};
 use mysql::prelude::Queryable;
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
+use std::sync::LazyLock;
 
 use crate::server::AppState;
 
 // Static lock-free hashmap for caching device data
-static DEVICE_CACHE: LockFreeHashMap<String, DeviceCacheEntry> = LockFreeHashMap::new();
+static DEVICE_CACHE: LazyLock<LockFreeHashMap<String, DeviceCacheEntry>> = LazyLock::new(|| LockFreeHashMap::new());
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct DeviceCacheEntry {
     pub mac: String,
     pub ip: String,
@@ -126,21 +127,34 @@ impl HealthService {
         let start_time = std::time::Instant::now();
 
         match state.get_connection() {
-            Ok(mut conn) => match conn.query_drop("SELECT 1") {
-                Ok(_) => {
-                    let duration = start_time.elapsed();
-                    DatabaseHealth {
-                        is_connected: true,
-                        connection_test_duration_ms: Some(duration.as_millis() as u64),
-                        error_message: None,
+            Ok(mut conn) => {
+                let query_start = std::time::Instant::now();
+                match conn.query_drop("SELECT 1") {
+                    Ok(_) => {
+                        let query_duration = query_start.elapsed();
+                        let total_duration = start_time.elapsed();
+                        
+                        // Record database query performance for health check
+                        state.stats_monitor.record_db_query("SELECT 1 (health_check)", query_duration);
+                        
+                        DatabaseHealth {
+                            is_connected: true,
+                            connection_test_duration_ms: Some(total_duration.as_millis() as u64),
+                            error_message: None,
+                        }
                     }
-                }
-                Err(e) => {
-                    error!("Database health check query failed: {}", e);
-                    DatabaseHealth {
-                        is_connected: false,
-                        connection_test_duration_ms: None,
-                        error_message: Some(format!("Query failed: {}", e)),
+                    Err(e) => {
+                        error!("Database health check query failed: {}", e);
+                        
+                        // Still record the failed query timing
+                        let query_duration = query_start.elapsed();
+                        state.stats_monitor.record_db_query("SELECT 1 (health_check_failed)", query_duration);
+                        
+                        DatabaseHealth {
+                            is_connected: false,
+                            connection_test_duration_ms: None,
+                            error_message: Some(format!("Query failed: {}", e)),
+                        }
                     }
                 }
             },

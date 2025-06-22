@@ -102,8 +102,11 @@ async fn main() {
     info!("Server will listen on: {}", addr);
     info!("Health endpoint available at: http://{}/health", addr);
     info!("HBD endpoint available at: http://{}/hbd", addr);
+    info!("Stats endpoint available at: http://{}/stats", addr);
+    info!("Stats reset endpoint available at: http://{}/stats/reset", addr);
     info!("Server protocol: HTTP/1.1");
     info!("Server framework: Axum v0.7");
+    info!("Performance monitoring: Enabled (AtomicCell-based)");
 
     let listener = tokio::net::TcpListener::bind(addr)
         .await

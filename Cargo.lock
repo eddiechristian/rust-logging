@@ -171,6 +171,7 @@ dependencies = [
  "mysql",
  "serde",
  "serde_json",
+ "sp_stats_monitor",
  "tokio",
  "toml",
 ]
@@ -2081,6 +2082,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64"
 
 [[package]]
+name = "signal-hook"
+version = "0.3.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d881a16cf4426aa584979d30bd82cb33429027e42122b169753d6ef1085ed6e2"
+dependencies = [
+ "libc",
+ "signal-hook-registry",
+]
+
+[[package]]
 name = "signal-hook-registry"
 version = "1.4.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2109,6 +2120,19 @@ checksum = "e22376abed350d73dd1cd119b57ffccad95b4e585a7cda43e286245ce23c0678"
 dependencies = [
  "libc",
  "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "sp_stats_monitor"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "crossbeam",
+ "fastrand",
+ "serde",
+ "serde_json",
+ "signal-hook",
+ "tokio",
 ]
 
 [[package]]
