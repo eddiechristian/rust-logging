@@ -1,16 +1,19 @@
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use lockfreehashmap::LockFreeHashMap;
+use dashmap::DashMap;
 use log::{error, info};
 use mysql::prelude::Queryable;
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::sync::LazyLock;
+use std::thread;
+use std::time::Duration;
+use tokio::time::interval;
 
 use crate::server::AppState;
 
-// Static lock-free hashmap for caching device data
-static DEVICE_CACHE: LazyLock<LockFreeHashMap<String, DeviceCacheEntry>> = LazyLock::new(|| LockFreeHashMap::new());
+// Static concurrent hashmap for caching device data
+static DEVICE_CACHE: LazyLock<DashMap<String, DeviceCacheEntry>> = LazyLock::new(|| DashMap::new());
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct DeviceCacheEntry {
@@ -19,6 +22,16 @@ pub struct DeviceCacheEntry {
     pub last_ping: Option<i32>,
     pub last_seen: i64,
     pub heartbeat_count: u64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct CacheStats {
+    pub total_entries: usize,
+    pub active_entries: usize,
+    pub stale_entries: usize,
+    pub total_heartbeats: u64,
+    pub oldest_entry_age_seconds: i64,
+    pub newest_entry_age_seconds: i64,
 }
 
 #[derive(Deserialize)]
@@ -279,6 +292,195 @@ impl HbdService {
             params.id
         );
         Ok(())
+    }
+}
+
+/// Cache management utilities for device cache operations
+pub struct DeviceCacheManager;
+
+impl DeviceCacheManager {
+    /// Get a snapshot of all cache entries for iteration
+    pub fn get_cache_snapshot() -> Vec<(String, DeviceCacheEntry)> {
+        let mut entries = Vec::new();
+        
+        // DashMap provides excellent iteration support!
+        for entry in DEVICE_CACHE.iter() {
+            entries.push((entry.key().clone(), entry.value().clone()));
+        }
+        
+        info!("Retrieved {} entries from device cache", entries.len());
+        entries
+    }
+    
+    /// Update a device cache entry
+    pub fn update_cache_entry(device_id: String, mut entry: DeviceCacheEntry) -> Result<()> {
+        entry.last_seen = Utc::now().timestamp();
+        entry.heartbeat_count += 1;
+        
+        DEVICE_CACHE.insert(device_id.clone(), entry);
+        info!("Updated cache entry for device: {}", device_id);
+        Ok(())
+    }
+    
+    /// Add a new device entry to cache
+    pub fn add_device_entry(device_id: String, mac: String, ip: String, last_ping: Option<i32>) -> Result<()> {
+        let entry = DeviceCacheEntry {
+            mac,
+            ip,
+            last_ping,
+            last_seen: Utc::now().timestamp(),
+            heartbeat_count: 1,
+        };
+        
+        DEVICE_CACHE.insert(device_id.clone(), entry);
+        info!("Added new cache entry for device: {}", device_id);
+        Ok(())
+    }
+    
+    /// Get a specific device entry from cache
+    pub fn get_device_entry(device_id: &str) -> Option<DeviceCacheEntry> {
+        DEVICE_CACHE.get(device_id).map(|entry| entry.clone())
+    }
+    
+    /// Remove a specific device entry from cache
+    pub fn remove_device_entry(device_id: &str) -> Option<DeviceCacheEntry> {
+        DEVICE_CACHE.remove(device_id).map(|(_, entry)| entry)
+    }
+    
+    /// Iterate over all cache entries with a closure
+    pub fn iterate_cache_entries<F>(mut callback: F) 
+    where 
+        F: FnMut(&String, &DeviceCacheEntry),
+    {
+        for entry in DEVICE_CACHE.iter() {
+            callback(entry.key(), entry.value());
+        }
+    }
+    
+    /// Update all cache entries with a closure
+    pub fn update_all_entries<F>(mut updater: F) -> usize 
+    where 
+        F: FnMut(&String, &mut DeviceCacheEntry) -> bool, // return true to keep, false to remove
+    {
+        let mut updated_count = 0;
+        let mut to_remove = Vec::new();
+        
+        // First pass: update entries and collect keys to remove
+        for mut entry in DEVICE_CACHE.iter_mut() {
+            let key = entry.key().clone(); // Clone the key first
+            let should_keep = updater(&key, entry.value_mut());
+            if !should_keep {
+                to_remove.push(key);
+            }
+            updated_count += 1;
+        }
+        
+        // Second pass: remove entries marked for deletion
+        for key in to_remove {
+            DEVICE_CACHE.remove(&key);
+            info!("Removed cache entry for device: {}", key);
+        }
+        
+        updated_count
+    }
+    
+    /// Remove stale entries (older than specified duration in seconds)
+    pub fn cleanup_stale_entries(max_age_seconds: i64) -> usize {
+        let current_time = Utc::now().timestamp();
+        let mut removed_count = 0;
+        
+        // Collect stale keys
+        let stale_keys: Vec<String> = DEVICE_CACHE
+            .iter()
+            .filter(|entry| current_time - entry.value().last_seen > max_age_seconds)
+            .map(|entry| entry.key().clone())
+            .collect();
+        
+        // Remove stale entries
+        for key in stale_keys {
+            if DEVICE_CACHE.remove(&key).is_some() {
+                removed_count += 1;
+                info!("Removed stale cache entry for device: {}", key);
+            }
+        }
+        
+        info!("Cleaned up {} stale cache entries", removed_count);
+        removed_count
+    }
+    
+    /// Get current cache size
+    pub fn get_cache_size() -> usize {
+        DEVICE_CACHE.len()
+    }
+    
+    /// Get cache statistics
+    pub fn get_cache_stats() -> CacheStats {
+        let current_time = Utc::now().timestamp();
+        let mut stats = CacheStats {
+            total_entries: 0,
+            active_entries: 0,
+            stale_entries: 0,
+            total_heartbeats: 0,
+            oldest_entry_age_seconds: 0,
+            newest_entry_age_seconds: i64::MAX,
+        };
+        
+        for entry in DEVICE_CACHE.iter() {
+            stats.total_entries += 1;
+            stats.total_heartbeats += entry.value().heartbeat_count;
+            
+            let age = current_time - entry.value().last_seen;
+            
+            if age > 300 { // 5 minutes
+                stats.stale_entries += 1;
+            } else {
+                stats.active_entries += 1;
+            }
+            
+            if age > stats.oldest_entry_age_seconds {
+                stats.oldest_entry_age_seconds = age;
+            }
+            
+            if age < stats.newest_entry_age_seconds {
+                stats.newest_entry_age_seconds = age;
+            }
+        }
+        
+        if stats.total_entries == 0 {
+            stats.newest_entry_age_seconds = 0;
+        }
+        
+        stats
+    }
+    
+    /// Start a background thread for cache maintenance
+    pub fn start_cache_maintenance_thread(cleanup_interval_seconds: u64, max_age_seconds: i64) -> thread::JoinHandle<()> {
+        thread::spawn(move || {
+            info!("Starting device cache maintenance thread with {}s interval", cleanup_interval_seconds);
+            
+            loop {
+                thread::sleep(Duration::from_secs(cleanup_interval_seconds));
+                
+                let removed_count = Self::cleanup_stale_entries(max_age_seconds);
+                let cache_size = Self::get_cache_size();
+                info!("Cache maintenance completed. Current size: {}, Removed: {}", cache_size, removed_count);
+            }
+        })
+    }
+    
+    /// Start async cache maintenance task
+    pub async fn start_cache_maintenance_async(cleanup_interval_seconds: u64, max_age_seconds: i64) {
+        info!("Starting async device cache maintenance with {}s interval", cleanup_interval_seconds);
+        
+        let mut interval_timer = interval(Duration::from_secs(cleanup_interval_seconds));
+        
+        loop {
+            interval_timer.tick().await;
+            
+            let removed_count = Self::cleanup_stale_entries(max_age_seconds);
+            let cache_size = Self::get_cache_size();
+            info!("Async cache maintenance completed. Current size: {}, Removed: {}", cache_size, removed_count);
+        }
     }
 }
 

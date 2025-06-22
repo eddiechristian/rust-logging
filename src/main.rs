@@ -92,6 +92,25 @@ async fn main() {
     // Build our application with routes
     let app = server::create_router(db_pool);
 
+    // Start cache maintenance tasks
+    info!("Starting device cache maintenance tasks");
+    
+    // Option 1: Start cache maintenance in a separate thread
+    let _cache_thread = app::DeviceCacheManager::start_cache_maintenance_thread(
+        300,  // Clean every 5 minutes
+        1800, // Remove entries older than 30 minutes
+    );
+    
+    // Option 2: Start async cache maintenance task
+    tokio::spawn(async {
+        app::DeviceCacheManager::start_cache_maintenance_async(
+            300,  // Clean every 5 minutes
+            1800, // Remove entries older than 30 minutes
+        ).await;
+    });
+    
+    info!("Cache maintenance tasks started");
+
     // Server address from config
     let bind_addr = config.bind_address();
     let addr: SocketAddr = bind_addr.parse().unwrap_or_else(|_| {

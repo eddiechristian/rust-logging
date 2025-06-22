@@ -15,5 +15,6 @@ chrono = { version = "0.4", features = ["serde"] }
 crossbeam = "0.8"
 anyhow = "1.0"
 toml = "0.8"
-lockfreehashmap="0.1"
+dashmap = "6.1"
 sp_stats_monitor = { path = "../sp_stats_monitor" }
+env_logger = "0.10"
