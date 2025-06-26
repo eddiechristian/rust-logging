@@ -1,8 +1,13 @@
-use log::{error, info};
+use log::{error, info, warn};
 use mysql::prelude::Queryable;
 use mysql::{OptsBuilder, Pool};
+use notify::RecursiveMode;
+use notify_debouncer_mini::{new_debouncer, DebounceEventResult};
 use std::net::SocketAddr;
+use std::path::Path;
+use std::time::Duration;
 use tokio;
+use tokio::sync::mpsc;
 
 mod app;
 mod config;
@@ -33,8 +38,7 @@ fn init_logging() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-#[tokio::main]
-async fn main() {
+async fn run_server() -> bool {
     // Load configuration
     let config = match config::Config::load_or_default("config.toml") {
         Ok(cfg) => cfg,
@@ -92,7 +96,7 @@ async fn main() {
     // Build our application with routes
     let app = server::create_router(db_pool);
 
-    // Start cache maintenance tasks
+    // Start cache maintenance tasks (cache is preserved across restarts)
     info!("Starting device cache maintenance tasks");
     
     // Option 1: Start cache maintenance in a separate thread
@@ -136,14 +140,136 @@ async fn main() {
 
     info!("TCP listener bound successfully to {}", addr);
     info!("Server is ready to accept connections...");
+    info!("Press Ctrl+C to shutdown gracefully");
 
-    // Serve with connection info
-    if let Err(e) = axum::serve(
-        listener,
-        app.into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .await
-    {
-        error!("Server error: {}", e);
+    // Create channels for shutdown and config reload signals
+    let (shutdown_tx, mut shutdown_rx) = mpsc::channel::<()>(1);
+    let (config_reload_tx, mut config_reload_rx) = mpsc::channel::<()>(1);
+
+    // Set up file watcher for config.toml
+    let config_path = Path::new("config.toml");
+    let config_reload_tx_clone = config_reload_tx.clone();
+    
+    tokio::spawn(async move {
+        let (tx, mut rx) = mpsc::channel(1);
+        
+        let tx_clone = tx.clone();
+        let mut debouncer = match new_debouncer(
+            Duration::from_millis(500),
+            move |res: DebounceEventResult| {
+                if let Ok(events) = res {
+                    for event in events {
+                        if event.path.file_name().and_then(|n| n.to_str()) == Some("config.toml") {
+                            info!("Config file changed: {:?}", event.path);
+                            if let Err(e) = tx_clone.blocking_send(()) {
+                                error!("Failed to send config reload signal: {}", e);
+                            }
+                        }
+                    }
+                }
+            }
+        ) {
+            Ok(debouncer) => debouncer,
+            Err(e) => {
+                error!("Failed to create file watcher: {}", e);
+                return;
+            }
+        };
+
+        if let Err(e) = debouncer.watcher().watch(config_path.parent().unwrap_or(Path::new(".")), RecursiveMode::NonRecursive) {
+            error!("Failed to watch config directory: {}", e);
+            return;
+        }
+
+        info!("File watcher started for config.toml");
+        
+        while let Some(_) = rx.recv().await {
+            if let Err(e) = config_reload_tx_clone.send(()).await {
+                error!("Failed to send config reload signal: {}", e);
+                break;
+            }
+        }
+    });
+
+    // Create graceful shutdown signal
+    let shutdown_tx_clone = shutdown_tx.clone();
+    tokio::spawn(async move {
+        let ctrl_c = async {
+            tokio::signal::ctrl_c()
+                .await
+                .expect("Failed to install Ctrl+C handler");
+        };
+
+        #[cfg(unix)]
+        let terminate = async {
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .expect("Failed to install signal handler")
+                .recv()
+                .await;
+        };
+
+        #[cfg(not(unix))]
+        let terminate = std::future::pending::<()>();
+
+        tokio::select! {
+            _ = ctrl_c => {
+                info!("Received SIGINT (Ctrl+C), initiating graceful shutdown...");
+            }
+            _ = terminate => {
+                info!("Received SIGTERM, initiating graceful shutdown...");
+            }
+        }
+        
+        let _ = shutdown_tx_clone.send(()).await;
+    });
+
+    // Main server loop with config reload support
+    info!("Starting server with graceful shutdown and config reload support...");
+    
+    let should_restart = loop {
+        tokio::select! {
+            // Handle server shutdown signal
+            _ = shutdown_rx.recv() => {
+                info!("Shutdown signal received, stopping server...");
+                break false; // Don't restart
+            }
+            
+            // Handle config reload signal
+            _ = config_reload_rx.recv() => {
+                warn!("Config file changed, restarting server (cache will be preserved)...");
+                // Note: The cache (DeviceCacheManager) is static/global and will persist
+                // across this restart since we're not exiting the process
+                break true; // Restart
+            }
+            
+            // Run the server
+            result = axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            ) => {
+                if let Err(e) = result {
+                    error!("Server error: {}", e);
+                }
+                break false; // Don't restart on server error
+            }
+        }
+    };
+
+    info!("Server instance stopped");
+    should_restart
+}
+
+#[tokio::main]
+async fn main() {
+    loop {
+        let should_restart = run_server().await;
+        
+        if should_restart {
+            info!("Restarting server due to configuration change...");
+            tokio::time::sleep(Duration::from_millis(1000)).await; // Brief pause before restart
+        } else {
+            info!("Server shutdown complete. Goodbye!");
+            break;
+        }
     }
 }

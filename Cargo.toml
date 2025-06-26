@@ -19,3 +19,5 @@ dashmap = "6.1"
 mac_address = "1.1"
 sp_stats_monitor = { path = "../sp_stats_monitor" }
 env_logger = "0.10"
+notify = "6.1"
+notify-debouncer-mini = "0.4"
