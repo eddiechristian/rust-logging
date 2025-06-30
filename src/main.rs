@@ -1,8 +1,8 @@
 use log::{error, info, warn};
 use mysql::prelude::Queryable;
-use mysql::{OptsBuilder, Pool};
+use mysql::{OptsBuilder, Pool, PooledConn};
 use notify::RecursiveMode;
-use notify_debouncer_mini::{new_debouncer, DebounceEventResult};
+use notify_debouncer_mini::{DebounceEventResult, new_debouncer};
 use std::net::SocketAddr;
 use std::path::Path;
 use std::time::Duration;
@@ -35,6 +35,17 @@ fn init_logging() -> Result<(), Box<dyn std::error::Error>> {
         )?;
 
     log4rs::init_config(config)?;
+    Ok(())
+}
+
+/// Configure MySQL session variables for a connection
+fn configure_mysql_session(conn: &mut PooledConn) -> Result<(), mysql::Error> {
+    // Set InnoDB lock wait timeout to 3 seconds
+    conn.query_drop("SET SESSION innodb_lock_wait_timeout = 3")?;
+
+    // Set general wait timeout to 60 seconds
+    conn.query_drop("SET SESSION wait_timeout = 60")?;
+
     Ok(())
 }
 
@@ -78,15 +89,23 @@ async fn run_server() -> bool {
         }
     };
 
-    // Test database connectivity
+    // Test database connectivity with session configuration
     match db_pool.get_conn() {
-        Ok(mut conn) => match conn.query_drop("SELECT 1") {
-            Ok(_) => info!("Database connectivity test successful"),
-            Err(e) => {
-                error!("Database connectivity test failed: {}", e);
+        Ok(mut conn) => {
+            // Configure session variables for initial connection
+            if let Err(e) = configure_mysql_session(&mut conn) {
+                error!("Failed to configure MySQL session variables: {}", e);
                 std::process::exit(1);
             }
-        },
+
+            match conn.query_drop("SELECT 1") {
+                Ok(_) => info!("Database connectivity test successful with session configuration"),
+                Err(e) => {
+                    error!("Database connectivity test failed: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        }
         Err(e) => {
             error!("Failed to get initial database connection: {}", e);
             std::process::exit(1);
@@ -98,21 +117,22 @@ async fn run_server() -> bool {
 
     // Start cache maintenance tasks (cache is preserved across restarts)
     info!("Starting device cache maintenance tasks");
-    
+
     // Option 1: Start cache maintenance in a separate thread
     let _cache_thread = app::DeviceCacheManager::start_cache_maintenance_thread(
         300,  // Clean every 5 minutes
         1800, // Remove entries older than 30 minutes
     );
-    
+
     // Option 2: Start async cache maintenance task
     tokio::spawn(async {
         app::DeviceCacheManager::start_cache_maintenance_async(
             300,  // Clean every 5 minutes
             1800, // Remove entries older than 30 minutes
-        ).await;
+        )
+        .await;
     });
-    
+
     info!("Cache maintenance tasks started");
 
     // Server address from config
@@ -126,7 +146,10 @@ async fn run_server() -> bool {
     info!("Health endpoint available at: http://{}/health", addr);
     info!("HBD endpoint available at: http://{}/hbd", addr);
     info!("Stats endpoint available at: http://{}/stats", addr);
-    info!("Stats reset endpoint available at: http://{}/stats/reset", addr);
+    info!(
+        "Stats reset endpoint available at: http://{}/stats/reset",
+        addr
+    );
     info!("Server protocol: HTTP/1.1");
     info!("Server framework: Axum v0.7");
     info!("Performance monitoring: Enabled (AtomicCell-based)");
@@ -149,10 +172,10 @@ async fn run_server() -> bool {
     // Set up file watcher for config.toml
     let config_path = Path::new("config.toml");
     let config_reload_tx_clone = config_reload_tx.clone();
-    
+
     tokio::spawn(async move {
         let (tx, mut rx) = mpsc::channel(1);
-        
+
         let tx_clone = tx.clone();
         let mut debouncer = match new_debouncer(
             Duration::from_millis(500),
@@ -167,7 +190,7 @@ async fn run_server() -> bool {
                         }
                     }
                 }
-            }
+            },
         ) {
             Ok(debouncer) => debouncer,
             Err(e) => {
@@ -176,13 +199,16 @@ async fn run_server() -> bool {
             }
         };
 
-        if let Err(e) = debouncer.watcher().watch(config_path.parent().unwrap_or(Path::new(".")), RecursiveMode::NonRecursive) {
+        if let Err(e) = debouncer.watcher().watch(
+            config_path.parent().unwrap_or(Path::new(".")),
+            RecursiveMode::NonRecursive,
+        ) {
             error!("Failed to watch config directory: {}", e);
             return;
         }
 
         info!("File watcher started for config.toml");
-        
+
         while let Some(_) = rx.recv().await {
             if let Err(e) = config_reload_tx_clone.send(()).await {
                 error!("Failed to send config reload signal: {}", e);
@@ -219,13 +245,13 @@ async fn run_server() -> bool {
                 info!("Received SIGTERM, initiating graceful shutdown...");
             }
         }
-        
+
         let _ = shutdown_tx_clone.send(()).await;
     });
 
     // Main server loop with config reload support
     info!("Starting server with graceful shutdown and config reload support...");
-    
+
     let should_restart = loop {
         tokio::select! {
             // Handle server shutdown signal
@@ -233,7 +259,7 @@ async fn run_server() -> bool {
                 info!("Shutdown signal received, stopping server...");
                 break false; // Don't restart
             }
-            
+
             // Handle config reload signal
             _ = config_reload_rx.recv() => {
                 warn!("Config file changed, restarting server (cache will be preserved)...");
@@ -241,7 +267,7 @@ async fn run_server() -> bool {
                 // across this restart since we're not exiting the process
                 break true; // Restart
             }
-            
+
             // Run the server
             result = axum::serve(
                 listener,
@@ -263,7 +289,7 @@ async fn run_server() -> bool {
 async fn main() {
     loop {
         let should_restart = run_server().await;
-        
+
         if should_restart {
             info!("Restarting server due to configuration change...");
             tokio::time::sleep(Duration::from_millis(1000)).await; // Brief pause before restart

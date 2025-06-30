@@ -15,11 +15,12 @@ use tokio::time::interval;
 use crate::server::AppState;
 
 // Static concurrent hashmap for caching device data with MacAddress as key
-static DEVICE_CACHE: LazyLock<DashMap<MacAddress, DeviceCacheEntry>> = LazyLock::new(|| DashMap::new());
+static DEVICE_CACHE: LazyLock<DashMap<MacAddress, DeviceCacheEntry>> =
+    LazyLock::new(|| DashMap::new());
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct DeviceCacheEntry {
-    pub device_id: String,  // Device identifier (moved from being the key)
+    pub device_id: String, // Device identifier (moved from being the key)
     pub ip: String,
     pub last_ping: Option<i32>,
     pub last_seen: i64,
@@ -148,10 +149,12 @@ impl HealthService {
                     Ok(_) => {
                         let query_duration = query_start.elapsed();
                         let total_duration = start_time.elapsed();
-                        
+
                         // Record database query performance for health check
-                        state.stats_monitor.record_db_query("SELECT 1 (health_check)", query_duration);
-                        
+                        state
+                            .stats_monitor
+                            .record_db_query("SELECT 1 (health_check)", query_duration);
+
                         DatabaseHealth {
                             is_connected: true,
                             connection_test_duration_ms: Some(total_duration.as_millis() as u64),
@@ -160,11 +163,13 @@ impl HealthService {
                     }
                     Err(e) => {
                         error!("Database health check query failed: {}", e);
-                        
+
                         // Still record the failed query timing
                         let query_duration = query_start.elapsed();
-                        state.stats_monitor.record_db_query("SELECT 1 (health_check_failed)", query_duration);
-                        
+                        state
+                            .stats_monitor
+                            .record_db_query("SELECT 1 (health_check_failed)", query_duration);
+
                         DatabaseHealth {
                             is_connected: false,
                             connection_test_duration_ms: None,
@@ -172,7 +177,7 @@ impl HealthService {
                         }
                     }
                 }
-            },
+            }
             Err(e) => {
                 error!("Failed to get database connection for health check: {}", e);
                 DatabaseHealth {
@@ -304,44 +309,49 @@ impl DeviceCacheManager {
     /// Get a snapshot of all cache entries for iteration
     pub fn get_cache_snapshot() -> Vec<(MacAddress, DeviceCacheEntry)> {
         let mut entries = Vec::new();
-        
+
         // DashMap provides excellent iteration support!
         for entry in DEVICE_CACHE.iter() {
             entries.push((*entry.key(), entry.value().clone()));
         }
-        
+
         info!("Retrieved {} entries from device cache", entries.len());
         entries
     }
-    
+
     /// Update a device cache entry by MAC address
     pub fn update_cache_entry(mac_address: MacAddress, mut entry: DeviceCacheEntry) -> Result<()> {
         entry.last_seen = Utc::now().timestamp();
         entry.heartbeat_count += 1;
-        
+
         DEVICE_CACHE.insert(mac_address, entry);
         info!("Updated cache entry for MAC: {}", mac_address);
         Ok(())
     }
-    
+
     /// Update a device cache entry by MAC address string
     pub fn update_cache_entry_by_mac_str(mac_str: &str, mut entry: DeviceCacheEntry) -> Result<()> {
         let mac_address = MacAddress::from_str(mac_str)
             .map_err(|e| anyhow::anyhow!("Invalid MAC address format '{}': {}", mac_str, e))?;
-        
+
         entry.last_seen = Utc::now().timestamp();
         entry.heartbeat_count += 1;
-        
+
         DEVICE_CACHE.insert(mac_address, entry);
         info!("Updated cache entry for MAC: {}", mac_address);
         Ok(())
     }
-    
+
     /// Add a new device entry to cache
-    pub fn add_device_entry(device_id: String, mac_str: String, ip: String, last_ping: Option<i32>) -> Result<()> {
+    pub fn add_device_entry(
+        device_id: String,
+        mac_str: String,
+        ip: String,
+        last_ping: Option<i32>,
+    ) -> Result<()> {
         let mac_address = MacAddress::from_str(&mac_str)
             .map_err(|e| anyhow::anyhow!("Invalid MAC address format '{}': {}", mac_str, e))?;
-        
+
         let entry = DeviceCacheEntry {
             device_id,
             ip,
@@ -349,17 +359,17 @@ impl DeviceCacheManager {
             last_seen: Utc::now().timestamp(),
             heartbeat_count: 1,
         };
-        
+
         DEVICE_CACHE.insert(mac_address, entry);
         info!("Added new cache entry for MAC: {}", mac_address);
         Ok(())
     }
-    
+
     /// Get a specific device entry from cache by MAC address
     pub fn get_device_entry_by_mac(mac_address: MacAddress) -> Option<DeviceCacheEntry> {
         DEVICE_CACHE.get(&mac_address).map(|entry| entry.clone())
     }
-    
+
     /// Get a specific device entry from cache by MAC address string
     pub fn get_device_entry_by_mac_str(mac_str: &str) -> Option<DeviceCacheEntry> {
         if let Ok(mac_address) = MacAddress::from_str(mac_str) {
@@ -368,12 +378,12 @@ impl DeviceCacheManager {
             None
         }
     }
-    
+
     /// Remove a specific device entry from cache by MAC address
     pub fn remove_device_entry_by_mac(mac_address: MacAddress) -> Option<DeviceCacheEntry> {
         DEVICE_CACHE.remove(&mac_address).map(|(_, entry)| entry)
     }
-    
+
     /// Remove a specific device entry from cache by MAC address string
     pub fn remove_device_entry_by_mac_str(mac_str: &str) -> Option<DeviceCacheEntry> {
         if let Ok(mac_address) = MacAddress::from_str(mac_str) {
@@ -382,45 +392,46 @@ impl DeviceCacheManager {
             None
         }
     }
-    
+
     /// Collect entries that match a given criteria (NEW FUNCTION)
-    pub fn collect_entries_matching<F>(predicate: F) -> Vec<(MacAddress, DeviceCacheEntry)> 
-    where 
+    pub fn collect_entries_matching<F>(predicate: F) -> Vec<(MacAddress, DeviceCacheEntry)>
+    where
         F: Fn(&MacAddress, &DeviceCacheEntry) -> bool,
     {
         let mut matching_entries = Vec::new();
-        
+
         for entry in DEVICE_CACHE.iter() {
             if predicate(entry.key(), entry.value()) {
                 matching_entries.push((*entry.key(), entry.value().clone()));
             }
         }
-        
-        info!("Collected {} entries matching criteria", matching_entries.len());
+
+        info!(
+            "Collected {} entries matching criteria",
+            matching_entries.len()
+        );
         matching_entries
     }
-    
+
     /// Collect entries by device ID pattern
-    pub fn collect_entries_by_device_pattern(device_pattern: &str) -> Vec<(MacAddress, DeviceCacheEntry)> {
-        Self::collect_entries_matching(|_mac, entry| {
-            entry.device_id.contains(device_pattern)
-        })
+    pub fn collect_entries_by_device_pattern(
+        device_pattern: &str,
+    ) -> Vec<(MacAddress, DeviceCacheEntry)> {
+        Self::collect_entries_matching(|_mac, entry| entry.device_id.contains(device_pattern))
     }
-    
+
     /// Collect entries by IP pattern
     pub fn collect_entries_by_ip_pattern(ip_pattern: &str) -> Vec<(MacAddress, DeviceCacheEntry)> {
-        Self::collect_entries_matching(|_mac, entry| {
-            entry.ip.contains(ip_pattern)
-        })
+        Self::collect_entries_matching(|_mac, entry| entry.ip.contains(ip_pattern))
     }
-    
+
     /// Collect entries with heartbeat count above threshold
-    pub fn collect_entries_with_high_heartbeats(min_heartbeats: u64) -> Vec<(MacAddress, DeviceCacheEntry)> {
-        Self::collect_entries_matching(|_mac, entry| {
-            entry.heartbeat_count >= min_heartbeats
-        })
+    pub fn collect_entries_with_high_heartbeats(
+        min_heartbeats: u64,
+    ) -> Vec<(MacAddress, DeviceCacheEntry)> {
+        Self::collect_entries_matching(|_mac, entry| entry.heartbeat_count >= min_heartbeats)
     }
-    
+
     /// Collect entries newer than specified age
     pub fn collect_entries_newer_than(max_age_seconds: i64) -> Vec<(MacAddress, DeviceCacheEntry)> {
         let current_time = Utc::now().timestamp();
@@ -428,25 +439,25 @@ impl DeviceCacheManager {
             current_time - entry.last_seen <= max_age_seconds
         })
     }
-    
+
     /// Iterate over all cache entries with a closure
-    pub fn iterate_cache_entries<F>(mut callback: F) 
-    where 
+    pub fn iterate_cache_entries<F>(mut callback: F)
+    where
         F: FnMut(&MacAddress, &DeviceCacheEntry),
     {
         for entry in DEVICE_CACHE.iter() {
             callback(entry.key(), entry.value());
         }
     }
-    
+
     /// Update all cache entries with a closure
-    pub fn update_all_entries<F>(mut updater: F) -> usize 
-    where 
+    pub fn update_all_entries<F>(mut updater: F) -> usize
+    where
         F: FnMut(&MacAddress, &mut DeviceCacheEntry) -> bool, // return true to keep, false to remove
     {
         let mut updated_count = 0;
         let mut to_remove = Vec::new();
-        
+
         // First pass: update entries and collect keys to remove
         for mut entry in DEVICE_CACHE.iter_mut() {
             let key = *entry.key(); // Copy the MacAddress
@@ -456,28 +467,28 @@ impl DeviceCacheManager {
             }
             updated_count += 1;
         }
-        
+
         // Second pass: remove entries marked for deletion
         for key in to_remove {
             DEVICE_CACHE.remove(&key);
             info!("Removed cache entry for MAC: {}", key);
         }
-        
+
         updated_count
     }
-    
+
     /// Remove stale entries (older than specified duration in seconds)
     pub fn cleanup_stale_entries(max_age_seconds: i64) -> usize {
         let current_time = Utc::now().timestamp();
         let mut removed_count = 0;
-        
+
         // Collect stale keys
         let stale_keys: Vec<MacAddress> = DEVICE_CACHE
             .iter()
             .filter(|entry| current_time - entry.value().last_seen > max_age_seconds)
             .map(|entry| *entry.key())
             .collect();
-        
+
         // Remove stale entries
         for key in stale_keys {
             if DEVICE_CACHE.remove(&key).is_some() {
@@ -485,16 +496,16 @@ impl DeviceCacheManager {
                 info!("Removed stale cache entry for MAC: {}", key);
             }
         }
-        
+
         info!("Cleaned up {} stale cache entries", removed_count);
         removed_count
     }
-    
+
     /// Get current cache size
     pub fn get_cache_size() -> usize {
         DEVICE_CACHE.len()
     }
-    
+
     /// Get cache statistics
     pub fn get_cache_stats() -> CacheStats {
         let current_time = Utc::now().timestamp();
@@ -506,79 +517,98 @@ impl DeviceCacheManager {
             oldest_entry_age_seconds: 0,
             newest_entry_age_seconds: i64::MAX,
         };
-        
+
         for entry in DEVICE_CACHE.iter() {
             stats.total_entries += 1;
             stats.total_heartbeats += entry.value().heartbeat_count;
-            
+
             let age = current_time - entry.value().last_seen;
-            
-            if age > 300 { // 5 minutes
+
+            if age > 300 {
+                // 5 minutes
                 stats.stale_entries += 1;
             } else {
                 stats.active_entries += 1;
             }
-            
+
             if age > stats.oldest_entry_age_seconds {
                 stats.oldest_entry_age_seconds = age;
             }
-            
+
             if age < stats.newest_entry_age_seconds {
                 stats.newest_entry_age_seconds = age;
             }
         }
-        
+
         if stats.total_entries == 0 {
             stats.newest_entry_age_seconds = 0;
         }
-        
+
         stats
     }
-    
+
     /// Start a background thread for cache maintenance
-    pub fn start_cache_maintenance_thread(cleanup_interval_seconds: u64, max_age_seconds: i64) -> thread::JoinHandle<()> {
+    pub fn start_cache_maintenance_thread(
+        cleanup_interval_seconds: u64,
+        max_age_seconds: i64,
+    ) -> thread::JoinHandle<()> {
         thread::spawn(move || {
-            info!("Starting device cache maintenance thread with {}s interval", cleanup_interval_seconds);
-            
+            info!(
+                "Starting device cache maintenance thread with {}s interval",
+                cleanup_interval_seconds
+            );
+
             loop {
                 thread::sleep(Duration::from_secs(cleanup_interval_seconds));
-                
+
                 let removed_count = Self::cleanup_stale_entries(max_age_seconds);
                 let cache_size = Self::get_cache_size();
-                info!("Cache maintenance completed. Current size: {}, Removed: {}", cache_size, removed_count);
+                info!(
+                    "Cache maintenance completed. Current size: {}, Removed: {}",
+                    cache_size, removed_count
+                );
             }
         })
     }
-    
+
     /// Start async cache maintenance task
-    pub async fn start_cache_maintenance_async(cleanup_interval_seconds: u64, max_age_seconds: i64) {
-        info!("Starting async device cache maintenance with {}s interval", cleanup_interval_seconds);
-        
+    pub async fn start_cache_maintenance_async(
+        cleanup_interval_seconds: u64,
+        max_age_seconds: i64,
+    ) {
+        info!(
+            "Starting async device cache maintenance with {}s interval",
+            cleanup_interval_seconds
+        );
+
         let mut interval_timer = interval(Duration::from_secs(cleanup_interval_seconds));
-        
+
         loop {
             interval_timer.tick().await;
-            
+
             let removed_count = Self::cleanup_stale_entries(max_age_seconds);
             let cache_size = Self::get_cache_size();
-            info!("Async cache maintenance completed. Current size: {}, Removed: {}", cache_size, removed_count);
+            info!(
+                "Async cache maintenance completed. Current size: {}, Removed: {}",
+                cache_size, removed_count
+            );
         }
     }
-    
+
     /// Remove cache entries that match a given predicate
-    pub fn remove_entries_matching_mac<F>(predicate: F) -> usize 
-    where 
+    pub fn remove_entries_matching_mac<F>(predicate: F) -> usize
+    where
         F: Fn(&MacAddress, &DeviceCacheEntry) -> bool,
     {
         let mut removed_count = 0;
-        
+
         // Collect keys that match the predicate
         let keys_to_remove: Vec<MacAddress> = DEVICE_CACHE
             .iter()
             .filter(|entry| predicate(entry.key(), entry.value()))
             .map(|entry| *entry.key())
             .collect();
-        
+
         // Remove the matching entries
         for key in keys_to_remove {
             if DEVICE_CACHE.remove(&key).is_some() {
@@ -586,39 +616,31 @@ impl DeviceCacheManager {
                 info!("Removed cache entry for MAC: {} (matched criteria)", key);
             }
         }
-        
+
         info!("Removed {} cache entries matching criteria", removed_count);
         removed_count
     }
-    
+
     /// Remove cache entries by IP address pattern
     pub fn remove_entries_by_ip_pattern(ip_pattern: &str) -> usize {
-        Self::remove_entries_matching_mac(|_mac, entry| {
-            entry.ip.contains(ip_pattern)
-        })
+        Self::remove_entries_matching_mac(|_mac, entry| entry.ip.contains(ip_pattern))
     }
-    
+
     /// Remove cache entries by MAC address pattern (as string)
     pub fn remove_entries_by_mac_pattern(mac_pattern: &str) -> usize {
-        Self::remove_entries_matching_mac(|mac, _entry| {
-            mac.to_string().contains(mac_pattern)
-        })
+        Self::remove_entries_matching_mac(|mac, _entry| mac.to_string().contains(mac_pattern))
     }
-    
+
     /// Remove cache entries with low heartbeat count
     pub fn remove_entries_with_low_heartbeats(min_heartbeats: u64) -> usize {
-        Self::remove_entries_matching_mac(|_mac, entry| {
-            entry.heartbeat_count < min_heartbeats
-        })
+        Self::remove_entries_matching_mac(|_mac, entry| entry.heartbeat_count < min_heartbeats)
     }
-    
+
     /// Remove cache entries by device ID pattern
     pub fn remove_entries_by_device_pattern(device_pattern: &str) -> usize {
-        Self::remove_entries_matching_mac(|_mac, entry| {
-            entry.device_id.contains(device_pattern)
-        })
+        Self::remove_entries_matching_mac(|_mac, entry| entry.device_id.contains(device_pattern))
     }
-    
+
     /// Remove cache entries older than specified age (more flexible than cleanup_stale_entries)
     pub fn remove_entries_older_than(max_age_seconds: i64) -> usize {
         let current_time = Utc::now().timestamp();
@@ -626,22 +648,22 @@ impl DeviceCacheManager {
             current_time - entry.last_seen > max_age_seconds
         })
     }
-    
+
     /// Iterate and conditionally remove entries with detailed logging
-    pub fn iterate_and_remove_with_logging<F>(mut condition: F) -> (usize, usize) 
-    where 
+    pub fn iterate_and_remove_with_logging<F>(mut condition: F) -> (usize, usize)
+    where
         F: FnMut(&MacAddress, &DeviceCacheEntry) -> bool,
     {
         let mut total_checked = 0;
         let mut removed_count = 0;
         let mut keys_to_remove = Vec::new();
-        
+
         // First pass: iterate and check conditions
         for entry in DEVICE_CACHE.iter() {
             total_checked += 1;
             let mac_address = entry.key();
             let cache_entry = entry.value();
-            
+
             info!(
                 "Checking MAC {}: device_id={}, IP={}, heartbeats={}, age={}s",
                 mac_address,
@@ -650,13 +672,13 @@ impl DeviceCacheManager {
                 cache_entry.heartbeat_count,
                 Utc::now().timestamp() - cache_entry.last_seen
             );
-            
+
             if condition(mac_address, cache_entry) {
                 info!("MAC {} marked for removal", mac_address);
                 keys_to_remove.push(*mac_address);
             }
         }
-        
+
         // Second pass: remove marked entries
         for key in keys_to_remove {
             if let Some((_, removed_entry)) = DEVICE_CACHE.remove(&key) {
@@ -667,15 +689,15 @@ impl DeviceCacheManager {
                 );
             }
         }
-        
+
         info!(
             "Iteration completed: checked {} entries, removed {} entries",
             total_checked, removed_count
         );
-        
+
         (total_checked, removed_count)
     }
-    
+
     /// Advanced removal with multiple criteria
     pub fn remove_entries_advanced_criteria(
         max_age_seconds: Option<i64>,
@@ -685,7 +707,7 @@ impl DeviceCacheManager {
         device_patterns: Option<&[&str]>,
     ) -> usize {
         let current_time = Utc::now().timestamp();
-        
+
         Self::remove_entries_matching_mac(|mac_address, entry| {
             // Check age criteria
             if let Some(max_age) = max_age_seconds {
@@ -693,14 +715,14 @@ impl DeviceCacheManager {
                     return true;
                 }
             }
-            
+
             // Check heartbeat criteria
             if let Some(min_beats) = min_heartbeats {
                 if entry.heartbeat_count < min_beats {
                     return true;
                 }
             }
-            
+
             // Check IP patterns
             if let Some(patterns) = ip_patterns {
                 for pattern in patterns {
@@ -709,7 +731,7 @@ impl DeviceCacheManager {
                     }
                 }
             }
-            
+
             // Check MAC patterns
             if let Some(patterns) = mac_patterns {
                 let mac_str = mac_address.to_string();
@@ -719,7 +741,7 @@ impl DeviceCacheManager {
                     }
                 }
             }
-            
+
             // Check device ID patterns
             if let Some(patterns) = device_patterns {
                 for pattern in patterns {
@@ -728,7 +750,7 @@ impl DeviceCacheManager {
                     }
                 }
             }
-            
+
             false
         })
     }
